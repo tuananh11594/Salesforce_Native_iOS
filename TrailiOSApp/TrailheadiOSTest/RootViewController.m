@@ -34,6 +34,7 @@
 
 #pragma mark Misc
 
+
 - (void)didReceiveMemoryWarning
 {
     // Releases the view if it doesn't have a superview.
@@ -55,7 +56,7 @@
     self.title = @"Mobile SDK Sample App";
     
     //Here we use a query that should work on either Force.com or Database.com
-    SFRestRequest *request = [[SFRestAPI sharedInstance] requestForQuery:@"SELECT Name FROM User LIMIT 10"];
+    SFRestRequest *request = [[SFRestAPI sharedInstance] requestForQuery:@"SELECT Name FROM Contact LIMIT 10"];
     [[SFRestAPI sharedInstance] send:request delegate:self];
 }
 
@@ -64,7 +65,8 @@
 - (void)request:(SFRestRequest *)request didLoadResponse:(id)jsonResponse {
     NSArray *records = jsonResponse[@"records"];
     NSLog(@"request:didLoadResponse: #records: %lu", (unsigned long)records.count);
-    self.dataRows = records;
+    //self.dataRows = records;
+    self.dataRows = [records mutableCopy];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.tableView reloadData];
     });
@@ -74,16 +76,71 @@
 - (void)request:(SFRestRequest*)request didFailLoadWithError:(NSError*)error {
     NSLog(@"request:didFailLoadWithError: %@", error);
     // Add your failed error handling here
+    dispatch_async(dispatch_get_main_queue(),
+                   ^{
+                       [self reinstateDeletedRowWithRequest:request];
+                       [self.tableView reloadData];
+                       UIAlertController *alert = [UIAlertController
+                                                   alertControllerWithTitle:@"Cannot delete item"
+                                                   message:[error.userInfo objectForKey:@"NSLocalizedDescription"]
+                                                   preferredStyle:UIAlertControllerStyleAlert];
+                       UIAlertAction* cancel = [UIAlertAction
+                                                actionWithTitle:@"Cancel"
+                                                style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction * action) {
+                                                    [alert dismissViewControllerAnimated:YES completion:nil];
+                                                }];
+                       [alert addAction:cancel];
+                       [self presentViewController:alert animated:YES completion:nil];
+                   });
+
 }
 
 - (void)requestDidCancelLoad:(SFRestRequest *)request {
     NSLog(@"requestDidCancelLoad: %@", request);
     // Add your failed error handling here
-}
+    dispatch_async(dispatch_get_main_queue(),
+                   ^{
+                       [self reinstateDeletedRowWithRequest:request];
+                       [self.tableView reloadData];
+                       UIAlertController *alert = [UIAlertController
+                                                   alertControllerWithTitle:@"Cannot delete item"
+                                                   message:@"The server cancelled the load"
+                                                   preferredStyle:UIAlertControllerStyleAlert];
+
+                       UIAlertAction* cancel = [UIAlertAction
+                                                actionWithTitle:@"Cancel"
+                                                style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction * action) {
+                                                    [alert dismissViewControllerAnimated:YES completion:nil];
+                                                }];
+                       [alert addAction:cancel];
+                       [self presentViewController:alert animated:YES completion:nil];
+                   });
+
+    }
 
 - (void)requestDidTimeout:(SFRestRequest *)request {
     NSLog(@"requestDidTimeout: %@", request);
     // Add your failed error handling here
+    dispatch_async(dispatch_get_main_queue(),
+                   ^{
+                       [self reinstateDeletedRowWithRequest:request];
+                       [self.tableView reloadData];
+                       UIAlertController *alert = [UIAlertController
+                                                   alertControllerWithTitle:@"Cannot delete item"
+                                                   message:@"The server request timed out"
+                                                   preferredStyle:UIAlertControllerStyleAlert];
+
+                       UIAlertAction* cancel = [UIAlertAction
+                                                actionWithTitle:@"Cancel"
+                                                style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction * action) {
+                                                    [alert dismissViewControllerAnimated:YES completion:nil];
+                                                }];
+                       [alert addAction:cancel];
+                       [self presentViewController:alert animated:YES completion:nil];
+                   });
 }
 
 
@@ -121,4 +178,77 @@
     return cell;
     
 }
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tableView
+editingStyleForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    NSUInteger row = [indexPath row];
+    NSUInteger count = [dataRows count];
+    if (row < count) {
+        return UITableViewCellEditingStyleDelete;
+    } else {
+        return UITableViewCellEditingStyleNone;
+    }
+
+}
+
+- (void)tableView:(UITableView *)tView
+commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+forRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    NSUInteger row = [indexPath row];
+    NSUInteger count = [dataRows count];
+    if (row < count && editingStyle == UITableViewCellEditingStyleDelete)
+    {
+        //Remove from dictionary on server
+        //Get the ID of the record from the row in dataRows
+        //
+        NSString *deletedId = [[dataRows objectAtIndex:row] objectForKey:@"Id"];
+        // Capture these values before sending the delete request:
+        //    -- the associated REST response object
+        //    -- the index path
+        NSMutableArray *deletedItemInfo = [[NSMutableArray alloc] init];
+        [deletedItemInfo addObject:[dataRows objectAtIndex:row]];
+        [deletedItemInfo addObject:indexPath];
+        // Create a new DELETE request
+        SFRestRequest *request = [[SFRestAPI sharedInstance]
+                                  requestForDeleteWithObjectType:@"Contact"
+                                  objectId:deletedId];
+        if (self.deleteRequests == nil)
+        {
+            self.deleteRequests = [[NSMutableDictionary alloc] init];
+        }
+        
+        [self.deleteRequests setObject:deletedItemInfo
+                                forKey:[NSValue valueWithNonretainedObject:request]];
+        [dataRows removeObjectAtIndex:row];
+        
+        [tView deleteRowsAtIndexPaths:[NSArray arrayWithObject:indexPath]
+                     withRowAnimation:TRUE];
+        // Send the request
+        [[SFRestAPI sharedInstance] send:request delegate:self];
+
+    }
+
+}
+
+- (void)reinstateDeletedRowWithRequest:(SFRestRequest *)request
+{
+    // Reinsert deleted rows if the operation is DELETE and the ID matches the deleted ID.
+    // The trouble is, the NSError parameter doesn't give us that info, so we can't really
+    // judge which row caused this error.
+    NSNumber *val = [NSNumber numberWithUnsignedInteger:[request hash]];
+    NSArray *rowValues = [self.deleteRequests objectForKey:val];
+
+    // To avoid possible problems with using the original row number, insert the data object at
+    // the beginning of the dataRows dictionary (index 0).
+    if (rowValues)
+    {
+        [dataRows insertObject:rowValues[0] atIndex:0];
+        [tableView insertRowsAtIndexPaths:[NSArray arrayWithObject:rowValues[1]]
+                         withRowAnimation:UITableViewRowAnimationAutomatic];
+        [self.deleteRequests removeObjectForKey:val];
+    }
+}
+
+
 @end

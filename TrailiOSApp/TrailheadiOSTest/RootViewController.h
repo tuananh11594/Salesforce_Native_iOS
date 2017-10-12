@@ -33,5 +33,5 @@
 }
 
 @property (nonatomic, strong) NSArray *dataRows;
-
+@property (nonatomic, strong) NSMutableDictionary *deleteRequests;
 @end
